@@ -281,7 +281,7 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 		"name": "Keolapse Generator",
 		"description": "Creates a timelapse video with the keogram wrapped as a ring around the sky image",
 		"module": "allsky_keolapse",
-		"version": "v0.9.3",
+		"version": "v0.9.4",
 		"pythonversion": "3.10.0",
 		"centersettings": "false",
 		"testable": "true",
@@ -727,6 +727,17 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 		},
 		"businfo": [],
 		"changelog": {
+			"v0.9.4": [
+				{
+					"author": "Andy Felong",
+					"authorurl": "https://github.com/AndyOfLinux",
+					"changes": [
+						"Encode with CRF only: removed the -b:v/-maxrate/-bufsize rate caps that starved the encoder on noisy night-sky frames and caused visible macroblocking (video breaking up); file size is now controlled by resolution and quality/CRF",
+						"Pad output to even dimensions during the ffmpeg re-encode - libx264 rejects odd frame sizes, which could make the re-encode fail and silently ship the much larger intermediate mp4v file",
+						"Log ffmpeg stderr when the re-encode fails, instead of discarding it"
+					]
+				}
+			],
 			"v0.9.3": [
 				{
 					"author": "Andy Felong",
@@ -1337,7 +1348,7 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 				else:
 					crf = 17
 				quality_params = {'bitrate': f'{bitrate}k', 'quality': crf}
-				self.klog(1, f'Using timelapse quality settings (bitrate: {bitrate}k)')
+				self.klog(1, f'Using timelapse-derived CRF {crf} (from bitrate setting {bitrate}k)')
 			else:
 				quality_params = VIDEO_QUALITY.get(self.video_quality, VIDEO_QUALITY['medium'])
 				self.klog(1, f'Using video quality: {self.video_quality}')
@@ -1436,15 +1447,19 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 					pixfmt = timelapse_settings['pixfmt']
 					fflog = timelapse_settings['fflog']
 
+					# CRF-only encoding: rate caps (-b:v/-maxrate/-bufsize)
+					# starve the encoder on noisy night-sky frames and cause
+					# visible macroblocking. File size is controlled via
+					# resolution and CRF instead. The pad filter rounds odd
+					# frame dimensions up to even, which libx264 requires
+					# (the ring-expanded canvas is not guaranteed even).
 					ffmpeg_cmd = [
 						'ffmpeg', '-y',
 						'-i', temp_output,
 						'-c:v', vcodec,
 						'-preset', 'medium',
 						'-crf', str(quality_params['quality']),
-						'-b:v', quality_params['bitrate'],
-						'-maxrate', str(int(quality_params['bitrate'].replace('k', '')) * 2) + 'k',
-						'-bufsize', quality_params['bitrate'],
+						'-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
 						'-pix_fmt', pixfmt,
 						'-loglevel', fflog,
 						output_path
@@ -1456,9 +1471,7 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 						'-c:v', 'libx264',
 						'-preset', 'medium',
 						'-crf', str(quality_params['quality']),
-						'-b:v', quality_params['bitrate'],
-						'-maxrate', str(int(quality_params['bitrate'].replace('k', '')) * 2) + 'k',
-						'-bufsize', quality_params['bitrate'],
+						'-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
 						'-pix_fmt', 'yuv420p',
 						output_path
 					]
@@ -1470,8 +1483,12 @@ class ALLSKYKEOLAPSE(ALLSKYMODULEBASE):
 					os.remove(temp_output)
 
 			except Exception as e:
-				self.klog(0, f'ERROR: Failed to apply quality settings: {e}')
-				# If re-encoding fails, keep the original file
+				stderr_tail = ''
+				if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+					stderr_tail = ' STDERR: ' + e.stderr[-500:].decode('utf-8', 'replace').strip()
+				self.klog(0, f'ERROR: Failed to apply quality settings: {e}{stderr_tail}')
+				# If re-encoding fails, keep the original file. Note it is
+				# much larger than a re-encoded one (OpenCV mp4v).
 				if os.path.exists(temp_output):
 					os.rename(temp_output, output_path)
 					self.klog(0, 'Using original encoded video (ffmpeg failed)')
